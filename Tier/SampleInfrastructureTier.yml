@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Sample Infra Template (Singapore Region Only) **Must RUN Network Template
+  first**
+Parameters:
+  VPC:
+    Description: Select VPC ID
+    MinLength: '1'
+    Type: 'AWS::EC2::VPC::Id'
+    ConstraintDescription: Must not be empty
+  PublicSubnetAZ1:
+    Description: Select Public Subnet on first availability zone within selected VPC
+    MinLength: '1'
+    Type: 'AWS::EC2::Subnet::Id'
+    ConstraintDescription: Must not be empty
+  PublicSubnetAZ2:
+    Description: Select Public Subnet on second availability zone within selected VPC
+    MinLength: '1'
+    Type: 'AWS::EC2::Subnet::Id'
+    ConstraintDescription: Must not be empty
+  PrivateSubnetAZ1:
+    Description: Select Private Subnet on first availability zone within selected VPC
+    MinLength: '1'
+    Type: 'AWS::EC2::Subnet::Id'
+    ConstraintDescription: Must not be empty
+  PrivateSubnetAZ2:
+    Description: Select Private Subnet on second availability zone within selected VPC
+    MinLength: '1'
+    Type: 'AWS::EC2::Subnet::Id'
+    ConstraintDescription: Must not be empty
+  WEBEC2KeyName:
+    Description: >-
+      Name of an existing EC2 KeyPair to enable access to the WEB SERVER
+      instance
+    MinLength: '1'
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+  BASTIONEC2KeyName:
+    Description: >-
+      Name of an existing EC2 KeyPair to enable access to the BASTION SERVER
+      instance
+    MinLength: '1'
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+Mappings:
+  RegionMap:
+    ap-southeast-1:
+      AMIAmazon: ami-de90a5a2
+Resources:
+  WEBEC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Enable access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          SourceSecurityGroupId: !Ref BASTIONEC2SecurityGroup
+          Description: Base Security Access from BASTION Server
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref PublicELBSecurityGroup
+          Description: Default HTTP Access from Public ELB
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 122.55.14.126/32
+          Description: Default HTTP Access from 122.55.14.126
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          SourceSecurityGroupId: !Ref BASTIONEC2SecurityGroup
+          Description: Base Security Access to BASTION Server
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+  BASTIONEC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Enable access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 122.55.14.126/32
+          Description: Base Security Access from 122.55.14.126
+  PublicELBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Public ELB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+  PublicELBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 4
+      Matcher:
+        HttpCode: '200'
+      Name: !Join 
+        - ''
+        - - Target-
+          - !GetAtt 
+            - PublicELB
+            - LoadBalancerName
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      Targets:
+        - Id: !Ref WebServer1
+          Port: 80
+        - Id: !Ref WebServer2
+          Port: 80
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+  PublicELBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PublicELBTargetGroup
+      LoadBalancerArn: !Ref PublicELB
+      Port: '80'
+      Protocol: HTTP
+  PublicELB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetAZ1
+        - !Ref PublicSubnetAZ2
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '50'
+      SecurityGroups:
+        - !Ref PublicELBSecurityGroup
+  WebServer1:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      Comment1: Configure the bootstrap helpers to install the Apache Web Server
+      'AWS::CloudFormation::Init':
+        configSets:
+          Install:
+            - Install
+        Install:
+          packages:
+            yum:
+              httpd: []
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+    Properties:
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum update -y
+            - |
+              yum install -y aws-cfn-bootstrap
+            - |
+              # Install the files and packages from the metadata
+            - '/opt/aws/bin/cfn-init -v '
+            - ' --stack '
+            - !Ref 'AWS::StackName'
+            - ' --resource WebServer1'
+            - ' --configsets Install '
+            - ' --region '
+            - !Ref 'AWS::Region'
+            - |+
+
+      ImageId: !FindInMap 
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMIAmazon
+      InstanceType: t2.micro
+      KeyName: !Ref WEBEC2KeyName
+      Tags:
+        - Key: Name
+          Value: Web Server 1
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref WEBEC2SecurityGroup
+          DeviceIndex: '0'
+          DeleteOnTermination: 'true'
+          SubnetId: !Ref PrivateSubnetAZ1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: 'true'
+            VolumeSize: '10'
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+  WebServer2:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      Comment1: Configure the bootstrap helpers to install the Apache Web Server
+      'AWS::CloudFormation::Init':
+        configSets:
+          Install:
+            - Install
+        Install:
+          packages:
+            yum:
+              httpd: []
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+    Properties:
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum update -y
+            - |
+              yum install -y aws-cfn-bootstrap
+            - |
+              # Install the files and packages from the metadata
+            - '/opt/aws/bin/cfn-init -v '
+            - ' --stack '
+            - !Ref 'AWS::StackName'
+            - ' --resource WebServer2'
+            - ' --configsets Install '
+            - ' --region '
+            - !Ref 'AWS::Region'
+            - |+
+
+      ImageId: !FindInMap 
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMIAmazon
+      InstanceType: t2.micro
+      KeyName: !Ref WEBEC2KeyName
+      Tags:
+        - Key: Name
+          Value: Web Server 2
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref WEBEC2SecurityGroup
+          DeviceIndex: '0'
+          DeleteOnTermination: 'true'
+          SubnetId: !Ref PrivateSubnetAZ2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: 'true'
+            VolumeSize: '10'
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+  BastionServer:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !FindInMap 
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMIAmazon
+      InstanceType: t2.micro
+      KeyName: !Ref BASTIONEC2KeyName
+      Tags:
+        - Key: Name
+          Value: Bastion Server
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref BASTIONEC2SecurityGroup
+          DeviceIndex: '0'
+          DeleteOnTermination: 'true'
+          SubnetId: !Ref PublicSubnetAZ2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: 'true'
+            VolumeSize: '10'
+      IamInstanceProfile: !Ref BastionServerInstanceProfile
+  WebServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  WebServerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WebServerRole
+  BastionServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  BastionServerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref BastionServerRole
